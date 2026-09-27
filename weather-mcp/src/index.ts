@@ -6,7 +6,7 @@ import { startHealthServer } from "./health.js";
 import { cleanCity, MemoryCache, normalizeCity, WEATHER_CACHE_TTL_MS } from "./cache.js";
 import { OpenMeteoRiskService, WeatherDataError, WEATHER_UNAVAILABLE_MESSAGE } from "./open-meteo.js";
 import { InputError, parseWorkPeriod } from "./time.js";
-import type { RiskResult, RiskRequest } from "./open-meteo.js";
+import type { RiskResult, RiskRequest, SafeWindowRequest, SafeWeatherWindowResult } from "./open-meteo.js";
 
 const GEOCODING_API = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_API = "https://api.open-meteo.com/v1/forecast";
@@ -182,7 +182,10 @@ async function getWeather(city: string, days: number, fetchImpl: typeof fetch) {
 }
 
 export function createServer(
-  riskService = new OpenMeteoRiskService(),
+  riskService: {
+    assess(request: RiskRequest): Promise<RiskResult>;
+    findSafeWindow?(request: SafeWindowRequest): Promise<SafeWeatherWindowResult>;
+  } = new OpenMeteoRiskService(),
   weatherDependencies: { fetchImpl?: typeof fetch; now?: () => Date } = {}
 ): McpServer {
   const weatherFetch = weatherDependencies.fetchImpl ?? fetch;
@@ -195,7 +198,7 @@ export function createServer(
     { name: "weather-mcp", version: "1.0.0" },
     {
       instructions:
-        "Use get_weather to retrieve the current conditions and a 1-7 day forecast for a city. Weather data comes from Open-Meteo and may be temporarily unavailable."
+        "Use get_weather to retrieve a 1-7 day forecast, assess_weather_risk to assess one planned work period, compare_weather_windows to compare two periods, and find_safe_weather_window to search for the safest future window. Weather data comes from Open-Meteo and may be temporarily unavailable."
     }
   );
 
@@ -351,6 +354,43 @@ export function createServer(
           : error instanceof InputError
             ? error.message
             : "Не удалось сравнить погодные окна. Попробуйте позже.";
+        return {
+          content: [{ type: "text" as const, text: message }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  server.registerTool(
+    "find_safe_weather_window",
+    {
+      title: "Find safe weather window for outdoor work",
+      description: "Finds the safest full-hour Moscow-time window within a future search interval using one Open-Meteo forecast request.",
+      inputSchema: z.object({
+        city: z.string().trim().min(1, "Укажите название города.").max(120),
+        work_type: z.enum(["maintenance", "installation", "inspection"]),
+        search_start: z.string(),
+        search_end: z.string(),
+        duration_hours: z.number().int().min(1).max(8)
+      }).strict()
+    },
+    async (request) => {
+      try {
+        const result = riskService.findSafeWindow
+          ? await riskService.findSafeWindow(request)
+          : await new OpenMeteoRiskService(weatherFetch, weatherNow).findSafeWindow(request);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          structuredContent: result,
+          isError: result.kind !== "safe_weather_window"
+        };
+      } catch (error) {
+        const message = error instanceof WeatherDataError
+          ? WEATHER_UNAVAILABLE_MESSAGE
+          : error instanceof InputError
+            ? error.message
+            : "Не удалось найти безопасное погодное окно. Попробуйте позже.";
         return {
           content: [{ type: "text" as const, text: message }],
           isError: true

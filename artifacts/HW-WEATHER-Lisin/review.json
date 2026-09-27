@@ -1,0 +1,25 @@
+{
+  "verdict": "approve",
+  "acceptance_criteria": [
+    { "criterion": "find_safe_weather_window зарегистрирован в MCP listTools", "status": "verified", "evidence": "npm test включает MCP listTools assertions; npm run ci прошёл." },
+    { "criterion": "Успешный ответ содержит выбранное окно, альтернативы, checked_candidates, location, source и fetched_at", "status": "verified", "evidence": "safe-weather-window.test.mjs проверяет structuredContent и JSON text." },
+    { "criterion": "Ранжирование LOW < MEDIUM < HIGH, затем factors, затем earlier start", "status": "verified", "evidence": "Тест find_safe_weather_window ranks by risk, factor count and earlier full-hour candidate прошёл." },
+    { "criterion": "Один forecast-запрос на успешный поиск", "status": "verified", "evidence": "Тест проверяет urls.length === 2: geocoding + forecast." },
+    { "criterion": "Unknown/ambiguous city не выбираются автоматически", "status": "verified", "evidence": "Тест location errors checks isError true и отсутствие forecast-запроса." },
+    { "criterion": "Open-Meteo failure возвращает controlled error без partial structuredContent", "status": "verified", "evidence": "Тест maps Open-Meteo failures проверяет текст ошибки и structuredContent undefined." },
+    { "criterion": "Старые инструменты сохраняют поведение", "status": "verified", "evidence": "Регрессионные тесты get_weather, assess_weather_risk и compare_weather_windows прошли в npm run ci." }
+  ],
+  "findings": [],
+  "checks_reproduced": [
+    "npm run ci: pass, 33/33 tests",
+    "MCP in-memory successful find_safe_weather_window call",
+    "MCP in-memory ambiguous city controlled refusal"
+  ],
+  "checks_not_reproduced": [
+    "MCP Inspector UI manual check"
+  ],
+  "residual_risks": [
+    "weather-mcp/package-lock.json has a pre-existing unrelated diff.",
+    "Timeout test uses a real five-second abort."
+  ]
+}

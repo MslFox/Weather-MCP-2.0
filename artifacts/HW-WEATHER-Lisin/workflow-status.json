@@ -1,0 +1,12 @@
+{
+  "task_key": "HW-WEATHER-Lisin",
+  "state": "VERIFIED",
+  "history": [
+    { "state": "READY", "at": "2026-09-27T00:00:00+06:00", "note": "Задача получена из локального файла домашнего задания ЗАДАНИЕ.md." },
+    { "state": "ANALYZED", "at": "2026-09-27T00:00:00+06:00", "note": "Роль Analyst завершила извлечение требований и карту репозитория без изменения исходного кода." },
+    { "state": "PLANNED_AWAITING_APPROVAL", "at": "2026-09-27T00:00:00+06:00", "note": "Роль Planner подготовила implementation-plan-v2.md. Изменения исходного кода были заблокированы до одобрения пользователя." },
+    { "state": "IMPLEMENTED", "at": "2026-09-27T00:00:00+06:00", "note": "Роль Builder реализовала find_safe_weather_window, обновила README и тесты." },
+    { "state": "VERIFIED", "at": "2026-09-27T00:00:00+06:00", "note": "Роли Tester и Reviewer выполнили npm run ci, MCP examples и финальный review. npm run ci прошёл: 33/33 теста." }
+  ],
+  "approval_required_before": "Любой реальный merge, deploy, release или внешняя публикация."
+}

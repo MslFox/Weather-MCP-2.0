@@ -1,0 +1,57 @@
+task_id: HW-WEATHER-Lisin
+summary: Добавить find_safe_weather_window в weather-mcp после одобрения.
+architecture_decision: Переиспользовать assessRisk как единственный источник порогов риска, загрузить один hourly-прогноз для всего интервала поиска, локально сгенерировать кандидатов и ранжировать по уровню риска, количеству факторов и более раннему старту.
+alternatives_considered:
+  - option: Вызывать assess_weather_risk один раз для каждого кандидата.
+    rejected_because: Это создаст несколько внешних forecast-запросов и нарушит требование домашнего задания.
+  - option: Продублировать пороги риска в новом search-модуле.
+    rejected_because: Это создаст риск расхождения с поведением существующего assess_weather_risk.
+steps:
+  - id: 1
+    action: Добавить отдельные helper-функции для интервала поиска и времени кандидатов.
+    components: [weather-mcp/src/time.ts]
+    dependencies: []
+    risks: [Ошибки на часовых границах]
+    validation: [Unit-тесты для неполных границ и отсутствия кандидатов]
+  - id: 2
+    action: Извлечь общие helper-функции Open-Meteo для геокодирования и hourly-прогноза.
+    components: [weather-mcp/src/open-meteo.ts]
+    dependencies: [Open-Meteo API]
+    risks: [Регрессия в assess_weather_risk]
+    validation: [Существующие open-meteo tests плюс новые service tests поиска]
+  - id: 3
+    action: Реализовать метод поиска безопасного окна и ранжирование.
+    components: [weather-mcp/src/open-meteo.ts, weather-mcp/src/risk.ts]
+    dependencies: [assessRisk]
+    risks: [Неверный порядок tie-break]
+    validation: [Тесты ранжирования по риску, количеству факторов и времени]
+  - id: 4
+    action: Зарегистрировать MCP-инструмент find_safe_weather_window.
+    components: [weather-mcp/src/index.ts]
+    dependencies: [zod, MCP server]
+    risks: [Случайное изменение контрактов существующих инструментов]
+    validation: [MCP listTools и регрессионные тесты]
+  - id: 5
+    action: Обновить тесты и README.
+    components: [weather-mcp/test, weather-mcp/README.md]
+    dependencies: [node:test]
+    risks: [Недостаточные доказательства ручной проверки]
+    validation: [npm run ci, примеры MCP Inspector]
+tests:
+  - npm run ci
+  - MCP happy path для find_safe_weather_window
+  - MCP controlled failures для невалидного входа, неизвестного города, неоднозначного города и сбоя Open-Meteo
+  - Регрессионные тесты для get_weather, assess_weather_risk, compare_weather_windows
+  - Опциональные property-based или generated ranking invariant tests
+compatibility_checks:
+  - Имена существующих инструментов остаются доступными.
+  - Существующие формы ответов остаются неизменными.
+  - Поведение parseWorkPeriod остаётся неизменным для существующих инструментов.
+migration: []
+rollback:
+  - Откатить implementation commit или восстановить затронутые файлы.
+required_approvals:
+  - Одобрение пользователем artifacts/HW-WEATHER-Lisin/implementation-plan-v2.md перед изменениями исходного кода.
+open_questions:
+  - Точные имена полей ответа, предложенные в implementation-plan-v2.md, нужно проверить пользователю.
+status: PLANNED_AWAITING_APPROVAL

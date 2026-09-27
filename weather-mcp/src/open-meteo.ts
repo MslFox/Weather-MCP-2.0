@@ -1,6 +1,6 @@
 import { cleanCity, MemoryCache, normalizeCity, WEATHER_CACHE_TTL_MS } from "./cache.js";
 import { assessRisk, type HourlyWeather } from "./risk.js";
-import { intersectsHour, parseWorkPeriod, type WorkPeriod } from "./time.js";
+import { formatMoscowDateTime, intersectsHour, parseSearchInterval, parseWorkPeriod, type WorkPeriod } from "./time.js";
 
 const GEOCODING_API = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_API = "https://api.open-meteo.com/v1/forecast";
@@ -14,6 +14,14 @@ export interface RiskRequest {
   city: string;
   start_at: string;
   work_type: "maintenance" | "installation" | "inspection";
+  duration_hours: number;
+}
+
+export interface SafeWindowRequest {
+  city: string;
+  work_type: RiskRequest["work_type"];
+  search_start: string;
+  search_end: string;
   duration_hours: number;
 }
 
@@ -44,8 +52,44 @@ export type RiskResult =
       fetched_at: string;
     };
 
+type LocationErrorResult =
+  | Extract<RiskResult, { kind: "not_found" }>
+  | Extract<RiskResult, { kind: "ambiguous" }>;
+
+export type SafeWeatherWindowResult =
+  | LocationErrorResult
+  | {
+      kind: "safe_weather_window";
+      location: { city: string; region?: string; country: string; timezone: string };
+      query: SafeWindowRequest & { input_timezone: "Europe/Moscow" };
+      selected_window: SafeWeatherCandidate;
+      alternatives: SafeWeatherCandidate[];
+      checked_candidates: number;
+      source: "Open-Meteo";
+      fetched_at: string;
+    };
+
+export interface SafeWeatherCandidate {
+  start_at: string;
+  end_at: string;
+  period: { start_utc: string; end_utc: string };
+  risk_level: "LOW" | "MEDIUM" | "HIGH";
+  recommendation: "PROCEED" | "REVIEW" | "CANCEL";
+  factors: ReturnType<typeof assessRisk>["factors"];
+  hourly_weather: HourlyWeather[];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function locationSummary(location: Location): { city: string; region?: string; country: string; timezone: string } {
+  return {
+    city: location.name,
+    ...(location.admin1 ? { region: location.admin1 } : {}),
+    country: location.country,
+    timezone: location.timezone
+  };
 }
 
 function parseLocations(data: unknown): Location[] {
@@ -139,6 +183,36 @@ function parseForecast(data: unknown, period: WorkPeriod): { timezone: string; h
   return { timezone: data.timezone, hours };
 }
 
+function locationError(candidates: Location[]): LocationErrorResult | null {
+  if (candidates.length === 0) {
+    return { kind: "not_found", message: "Город или указанный регион/страна не найдены. Уточните название и попробуйте снова." };
+  }
+  if (candidates.length > 1) {
+    return {
+      kind: "ambiguous",
+      message: "Название города неоднозначно. Уточните город по одному из вариантов.",
+      options: candidates.slice(0, 5).map((location) => ({
+        city: location.name,
+        ...(location.admin1 ? { region: location.admin1 } : {}),
+        country: location.country,
+        location_id: location.id
+      }))
+    };
+  }
+  return null;
+}
+
+function selectLocation(locations: Location[], city: string): Location[] {
+  const [cityName, ...qualifiers] = cleanCity(city).split(",").map(normalizeCity).filter(Boolean);
+  const exactMatches = locations.filter((location) => normalizeCity(location.name) === cityName);
+  const namedCandidates = exactMatches.length > 0 ? exactMatches : locations;
+  return qualifiers.length === 0
+    ? namedCandidates
+    : namedCandidates.filter((location) => qualifiers.every((qualifier) =>
+        qualifier === normalizeCity(location.admin1 ?? "") || qualifier === normalizeCity(location.country)
+      ));
+}
+
 export class OpenMeteoRiskService {
   private readonly cache: MemoryCache<RiskResult>;
 
@@ -151,10 +225,14 @@ export class OpenMeteoRiskService {
 
   private async fetchJson(url: URL): Promise<unknown> {
     let response: Response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      response = await this.fetchImpl(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      response = await this.fetchImpl(url, { signal: controller.signal });
     } catch {
       throw new WeatherDataError(WEATHER_UNAVAILABLE_MESSAGE);
+    } finally {
+      clearTimeout(timeout);
     }
     if (!response.ok) throw new WeatherDataError(WEATHER_UNAVAILABLE_MESSAGE);
     try {
@@ -164,6 +242,28 @@ export class OpenMeteoRiskService {
     } catch {
       throw new WeatherDataError(WEATHER_UNAVAILABLE_MESSAGE);
     }
+  }
+
+  private async resolveLocation(city: string): Promise<Location | LocationErrorResult> {
+    const geocodingUrl = new URL(GEOCODING_API);
+    geocodingUrl.searchParams.set("name", cleanCity(city));
+    geocodingUrl.searchParams.set("count", "5");
+    geocodingUrl.searchParams.set("language", /[А-Яа-яЁё]/.test(city) ? "ru" : "en");
+    geocodingUrl.searchParams.set("format", "json");
+    const locations = parseLocations(await this.fetchJson(geocodingUrl));
+    const candidates = selectLocation(locations, city);
+    return locationError(candidates) ?? candidates[0];
+  }
+
+  private async fetchHourlyForecast(location: Location, period: WorkPeriod): Promise<HourlyWeather[]> {
+    const forecastUrl = new URL(FORECAST_API);
+    forecastUrl.searchParams.set("latitude", String(location.latitude));
+    forecastUrl.searchParams.set("longitude", String(location.longitude));
+    forecastUrl.searchParams.set("hourly", "temperature_2m,precipitation_probability,wind_speed_10m");
+    forecastUrl.searchParams.set("wind_speed_unit", "ms");
+    forecastUrl.searchParams.set("timezone", "UTC");
+    forecastUrl.searchParams.set("forecast_days", "6");
+    return parseForecast(await this.fetchJson(forecastUrl), period).hours;
   }
 
   async assess(request: RiskRequest): Promise<RiskResult> {
@@ -177,54 +277,21 @@ export class OpenMeteoRiskService {
     const cached = this.cache.get(cacheKey);
     if (cached) return cached;
 
-    const geocodingUrl = new URL(GEOCODING_API);
-    geocodingUrl.searchParams.set("name", cleanCity(request.city));
-    geocodingUrl.searchParams.set("count", "5");
-    geocodingUrl.searchParams.set("language", /[А-Яа-яЁё]/.test(request.city) ? "ru" : "en");
-    geocodingUrl.searchParams.set("format", "json");
-    const locations = parseLocations(await this.fetchJson(geocodingUrl));
-    const [cityName, ...qualifiers] = cleanCity(request.city).split(",").map(normalizeCity).filter(Boolean);
-    const exactName = cityName;
-    const exactMatches = locations.filter((location) => normalizeCity(location.name) === exactName);
-    const namedCandidates = exactMatches.length > 0 ? exactMatches : locations;
-    const candidates = qualifiers.length === 0
-      ? namedCandidates
-      : namedCandidates.filter((location) => qualifiers.every((qualifier) =>
-          qualifier === normalizeCity(location.admin1 ?? "") || qualifier === normalizeCity(location.country)
-        ));
-
+    const resolved = await this.resolveLocation(request.city);
     let result: RiskResult;
-    if (candidates.length === 0) {
-      result = { kind: "not_found", message: "Город или указанный регион/страна не найдены. Уточните название и попробуйте снова." };
-    } else if (candidates.length > 1) {
-      result = {
-        kind: "ambiguous",
-        message: "Название города неоднозначно. Уточните город по одному из вариантов.",
-        options: candidates.slice(0, 5).map((location) => ({
-          city: location.name,
-          region: location.admin1,
-          country: location.country,
-          location_id: location.id
-        }))
-      };
+    if ("kind" in resolved) {
+      result = resolved;
     } else {
-      const location = candidates[0];
-      const forecastUrl = new URL(FORECAST_API);
-      forecastUrl.searchParams.set("latitude", String(location.latitude));
-      forecastUrl.searchParams.set("longitude", String(location.longitude));
-      forecastUrl.searchParams.set("hourly", "temperature_2m,precipitation_probability,wind_speed_10m");
-      forecastUrl.searchParams.set("wind_speed_unit", "ms");
-      forecastUrl.searchParams.set("timezone", "UTC");
-      forecastUrl.searchParams.set("forecast_days", "6");
-      const forecast = parseForecast(await this.fetchJson(forecastUrl), period);
-      const risk = assessRisk(forecast.hours);
+      const location = resolved;
+      const hours = await this.fetchHourlyForecast(location, period);
+      const risk = assessRisk(hours);
       result = {
         kind: "assessment",
-        location: { city: location.name, region: location.admin1, country: location.country, timezone: location.timezone },
+        location: locationSummary(location),
         period: { start_utc: period.start.toISOString(), end_utc: period.end.toISOString(), input_timezone: "Europe/Moscow" },
         work_type: request.work_type,
         duration_hours: request.duration_hours,
-        hourly_weather: forecast.hours,
+        hourly_weather: hours,
         ...risk,
         source: "Open-Meteo",
         fetched_at: this.now().toISOString()
@@ -232,5 +299,45 @@ export class OpenMeteoRiskService {
     }
     if (result.kind === "assessment") this.cache.set(cacheKey, result);
     return result;
+  }
+
+  async findSafeWindow(request: SafeWindowRequest): Promise<SafeWeatherWindowResult> {
+    const { search, candidates } = parseSearchInterval(
+      request.search_start,
+      request.search_end,
+      request.duration_hours,
+      this.now()
+    );
+    const resolved = await this.resolveLocation(request.city);
+    if ("kind" in resolved) return resolved;
+
+    const hours = await this.fetchHourlyForecast(resolved, search);
+    const ranked = candidates.map((candidate) => {
+      const candidateHours = hours.filter((hour) => intersectsHour(new Date(hour.time), candidate));
+      const risk = assessRisk(candidateHours);
+      return {
+        start_at: formatMoscowDateTime(candidate.start),
+        end_at: formatMoscowDateTime(candidate.end),
+        period: { start_utc: candidate.start.toISOString(), end_utc: candidate.end.toISOString() },
+        hourly_weather: candidateHours,
+        ...risk
+      };
+    }).sort((left, right) => {
+      const rank = { LOW: 0, MEDIUM: 1, HIGH: 2 } as const;
+      return rank[left.risk_level] - rank[right.risk_level] ||
+        left.factors.length - right.factors.length ||
+        Date.parse(left.period.start_utc) - Date.parse(right.period.start_utc);
+    });
+
+    return {
+      kind: "safe_weather_window",
+      location: locationSummary(resolved),
+      query: { ...request, input_timezone: "Europe/Moscow" },
+      selected_window: ranked[0],
+      alternatives: ranked.slice(1, 4),
+      checked_candidates: candidates.length,
+      source: "Open-Meteo",
+      fetched_at: this.now().toISOString()
+    };
   }
 }
