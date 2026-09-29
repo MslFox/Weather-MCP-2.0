@@ -9,5 +9,16 @@
     "artifact_dir": "artifacts/HW-WEATHER-Lisin",
     "created_at": "2026-09-27T00:00:00+06:00",
     "updated_at": "2026-09-27T00:00:00+06:00"
+  },
+  {
+    "task_key": "20260929-hw-docs-lisin-question",
+    "external_id": null,
+    "source_system": "user-chat",
+    "source_url": "",
+    "title": "Изучение HW-DOCS-Lisin и ответ на вопрос",
+    "state": "DOCUMENTED",
+    "artifact_dir": "artifacts/20260929-hw-docs-lisin-question",
+    "created_at": "2026-09-29T17:56:56.3286392+06:00",
+    "updated_at": "2026-09-29T17:57:30.3393513+06:00"
   }
 ]
